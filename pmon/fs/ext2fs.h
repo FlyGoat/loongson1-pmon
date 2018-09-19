@@ -1,6 +1,11 @@
 #ifndef __INCLUDE_EXT2_H__
 #define __INCLUDE_EXT2_H__
 
+#define LINUX_PARTATION_ID 0x83
+
+#define EXT2_OLD_SUPER_MAGIC  0xef51
+#define EXT2_SUPER_MAGIC      0xef53
+
 #define EXT2_ROOT_INO		 2	/* Root inode */
 
 typedef unsigned char __u8;
@@ -9,7 +14,6 @@ typedef unsigned int __u32;
 typedef signed int __s32;
 typedef signed short __s16;
 
-#define le16_to_cpu(x) (x)
 #define	BLOCK_1KB 1024
 #define	EXT2_NDIR_BLOCKS		12
 #define	EXT2_IND_BLOCK			EXT2_NDIR_BLOCKS
@@ -17,7 +21,11 @@ typedef signed short __s16;
 #define	EXT2_TIND_BLOCK			(EXT2_DIND_BLOCK + 1)
 #define	EXT2_N_BLOCKS			(EXT2_TIND_BLOCK + 1)
 #define EXT2_NAME_LEN 255
-
+#define EXT2_FEAT_INCOMP_META_BG	0x10
+#define EXT2_FEAT_INCOMP_EXTENTS	0x40
+#define EXT2_FEAT_INCOMP_64BIT		0x80
+#define EXT2_FEAT_INCOMP_FLEX_BG	0x200
+#define EXT2_FEAT_INCOMP_EA_INODE	0x400
 enum {
 	EXT2_FT_UNKNOWN,
 	EXT2_FT_REG_FILE,
@@ -65,7 +73,7 @@ struct ext2_super_block {
 	 * the incompatible feature set is that if there is a bit set
 	 * in the incompatible feature set that the kernel doesn't
 	 * know about, it should refuse to mount the filesystem.
-	 * 
+	 *
 	 * e2fsck's requirements are more strict; if it doesn't know
 	 * about a feature in either the compatible or incompatible
 	 * feature set, it must abort and not try to meddle with
@@ -181,6 +189,56 @@ struct ext2_dir_entry_2 {
 };
 
 typedef struct ext2_dir_entry_2 ext2_dirent;
+/*
+ * ext4 related, imported from u-boot
+ * */
 
+#define EXT4_EXTENTS_FL		0x00080000 /* Inode uses extents */
+#define EXT4_EXT_MAGIC			0xf30a
+#define EXT4_FEATURE_RO_COMPAT_GDT_CSUM	0x0010
+#define EXT4_FEATURE_INCOMPAT_EXTENTS	0x0040
+#define EXT4_INDIRECT_BLOCKS		12
+
+#define EXT4_BG_INODE_UNINIT		0x0001
+#define EXT4_BG_BLOCK_UNINIT		0x0002
+#define EXT4_BG_INODE_ZEROED		0x0004
+
+/*
+ * ext4_inode has i_block array (60 bytes total).
+ * The first 12 bytes store ext4_extent_header;
+ * the remainder stores an array of ext4_extent.
+ */
+
+/*
+ * This is the extent on-disk structure.
+ * It's used at the bottom of the tree.
+ */
+struct ext4_extent {
+	__u32	ee_block;	/* first logical block extent covers */
+	__u16	ee_len;		/* number of blocks covered by extent */
+	__u16	ee_start_hi;	/* high 16 bits of physical block */
+	__u32	ee_start_lo;	/* low 32 bits of physical block */
+};
+
+/*
+ * This is index on-disk structure.
+ * It's used at all the levels except the bottom.
+ */
+struct ext4_extent_idx {
+	__u32	ei_block;	/* index covers logical blocks from 'block' */
+	__u32	ei_leaf_lo;	/* pointer to the physical block of the next *
+				 * level. leaf or next index could be there */
+	__u16	ei_leaf_hi;	/* high 16 bits of physical block */
+	__u16	ei_unused;
+};
+
+/* Each block (leaves and indexes), even inode-stored has header. */
+struct ext4_extent_hdr {
+	__u16	eh_magic;	/* probably will support different formats */
+	__u16	eh_entries;	/* number of valid entries */
+	__u16	eh_max;		/* capacity of store in entries */
+	__u16	eh_depth;	/* has tree real underlying blocks? */
+	__u32	eh_generation;	/* generation of the tree */
+};
 
 #endif

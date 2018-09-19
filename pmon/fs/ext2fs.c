@@ -6,142 +6,151 @@
 #include <sys/unistd.h>
 #include "ext2fs.h"
 #include <diskfs.h>
-//#define DEBUG_IDE
-extern int   devio_open (int, const char *, int, int);
-extern int   devio_close (int);
-extern int   devio_read (int, void *, size_t);
-extern int   devio_write (int, const void *, size_t);
-extern off_t devio_lseek (int, off_t, int);
+/*#define DEBUG_EXT2*/
+
+#define SECTOR_SIZE	512
+#define START_PARTION (start_sec * SECTOR_SIZE)
 
 
-static int ext2_read_file(int ,void *,size_t ,size_t ,struct ext2_inode * );
-static int ReadFromIndexBlock(int ,__u32,__u32,__u8 **,	size_t *,size_t *,__u32 *);
+#ifdef DEBUG_EXT2
+static void dump_feature(struct ext2_super_block *ext2_sb) {
+	if(ext2_sb->s_feature_incompat & EXT2_FEAT_INCOMP_EXTENTS)
+		printf("Ext2FS: feature_incomp_extents\n");
+	if(ext2_sb->s_feature_incompat & EXT2_FEAT_INCOMP_64BIT)
+		printf("Ext2FS: feature_incomp_64bit\n");
+	if(ext2_sb->s_feature_incompat & EXT2_FEAT_INCOMP_META_BG)
+		printf("Ext2FS: feature_incomp_meta_bg\n");
+	if(ext2_sb->s_feature_incompat & EXT2_FEAT_INCOMP_FLEX_BG)
+		printf("Ext2FS: feature_incomp_flex_bg\n");
+	if(ext2_sb->s_feature_incompat & EXT2_FEAT_INCOMP_EA_INODE)
+		printf("Ext2FS: feature_incomp_ea_inode\n");
+}
+#endif
+
+extern int devio_open(int , const char * , int , int);
+extern int devio_close(int);
+extern int devio_read(int , void * , size_t);
+extern int devio_write(int , const void * , size_t);
+extern off_t devio_lseek(int , off_t , int);
+
+
+static int ext2_read_file(int , void *, size_t , size_t , struct ext2_inode *);
+static int ReadFromIndexBlock(int , __u32 , __u32 , __u8 ** , size_t *, size_t * , __u32 *);
 static inline ext2_dirent *ext2_next_entry(ext2_dirent *);
-static int ext2_entrycmp(char * ,void *  , int );
-static int ext2_get_inode(int ,unsigned long ,struct ext2_inode ** );
-static int   ext2_load_linux(int ,int,const unsigned char *);
-static int   ext2_load_file_content(int ,struct ext2_inode * ,unsigned char * );
-static int   read_super_block(int,int);
-int   ext2_open (int, const char *, int, int);
-int   ext2_close (int);
-int   ext2_read (int, void *, size_t);
-int   ext2_write (int, const void *, size_t);
-off_t ext2_lseek (int, off_t, int);
+static int ext2_entrycmp(char *, void *, int );
+static int ext2_get_inode(int , unsigned long , struct ext2_inode ** );
+static int   ext2_load_linux(int , int , const unsigned char *);
+static int   read_super_block(int , int);
+int ext2_open(int , const char * , int , int);
+int ext2_close(int);
+int ext2_read(int , void * , size_t);
+int ext2_write(int , const void * , size_t);
+off_t ext2_lseek(int , off_t , int);
 
-__u32 RAW_BLOCK_SIZE=1024;
-unsigned long SECTORS_PER_BLOCK=2;	
-unsigned long GROUPDESCS_PER_BLOCK=32;	
-unsigned long INODES_PER_GROUP=0;
-unsigned long EXT2_INODE_SIZE=128;
+__u32 sb_block_size = 1024;
+unsigned long sb_grpdecs_per_block = 32;
+unsigned long sb_inodes_per_grp = 0;
+unsigned long sb_ext2_inode_size = 128;
+unsigned long sb_grpdesc_size = 32;
 off_t start_sec;
-#define EXT3_SUPER_MAGIC    0xEF53
-#define START_PARTION start_sec*512
-#define RAW_SECTOR_SIZE 512
-#define EXT2_GROUP_DESC_SIZE 32	
-static struct ext2_inode INODE_STRUCT;
-static struct ext2_inode *File_inode=&INODE_STRUCT;
-static int read_super_block(int fd,int index)
+static struct ext2_inode file_inode;
+static struct ext2_inode *the_inode = &file_inode;
+
+static int read_super_block(int fd, int index)
 {
-	__u8 *diskbuf,*leadbuf;
+	__u8 *diskbuf, *leadbuf;
 	struct ext2_super_block *ext2_sb;
-	int i,find_linux_partion;	
+	int i, find_linux_partion;
 	int err;
-	find_linux_partion=0;
-	diskbuf=leadbuf=0;
-	err=-1;
-	int k;
 
-	if((leadbuf=(__u8 *)malloc(RAW_SECTOR_SIZE))==NULL)
-	{
-		printf("Can't alloc memory for the super block!\n");
-		goto out;
-	}
-	if((diskbuf=(__u8 *)malloc(16*RAW_SECTOR_SIZE))==NULL)
-	{
-		printf("Can't alloc memory for the super block!\n");
-		goto out;
-	}
-	if(index)
-	{
-	devio_lseek(fd,0,0);
-	if((devio_read(fd,leadbuf,RAW_SECTOR_SIZE))!=RAW_SECTOR_SIZE){		
-		printf("Can't read the leading block from disk!\n");
-		goto out;
-	}
-	//search the partion table to find the linux partion wiht id=83
-	for(i=446;i<512;i+=0x10){
-		if(leadbuf[i+4]==0x83)
-		{	
-			start_sec=*(unsigned short *)(leadbuf+i+8+2);
-			start_sec<<=16;
-			start_sec+=*(unsigned short *)(leadbuf+i+8);
-			devio_lseek(fd,start_sec*RAW_SECTOR_SIZE,0);
-			if((devio_read(fd,diskbuf,16*RAW_SECTOR_SIZE))!=16*RAW_SECTOR_SIZE)
-			{
-				printf("Read the super block error!\n");
-				goto out;
-			}
-			ext2_sb=(struct ext2_super_block *)(diskbuf+1024);
-			if(ext2_sb->s_rev_level==0) //old version
-			{
-			EXT2_INODE_SIZE=128;
-			}
-			else
-			{
-			EXT2_INODE_SIZE=ext2_sb->s_inode_size;
-			}
-			INODES_PER_GROUP = ext2_sb->s_inodes_per_group;
-			RAW_BLOCK_SIZE = BLOCK_1KB << ext2_sb->s_log_block_size;
+	find_linux_partion = 0;
+	diskbuf = 0;
+	leadbuf = 0;
+	err = -1;
+	start_sec = 0;
 
-			SECTORS_PER_BLOCK = RAW_BLOCK_SIZE / RAW_SECTOR_SIZE;
-			GROUPDESCS_PER_BLOCK = RAW_BLOCK_SIZE / EXT2_GROUP_DESC_SIZE;
-			if(ext2_sb->s_magic==EXT3_SUPER_MAGIC)
-			{
-			find_linux_partion++;
-			if(index==find_linux_partion){
-				err=0;
-				goto out;
-			}
+	if(!(leadbuf = (__u8 *)malloc(SECTOR_SIZE))) {
+
+		printf("Ext2FS: Can't alloc memory for the Super Block\n");
+		goto out;
+	}
+	if(!(diskbuf = (__u8 *)malloc(16 * SECTOR_SIZE))) {
+
+		printf("Ext2FS: Can't alloc memory for the Super Block\n");
+		goto out;
+	}
+	if(index) {
+		devio_lseek(fd, 0, 0);
+		if(devio_read(fd, leadbuf, SECTOR_SIZE) != SECTOR_SIZE) {
+			printf("Ext2FS: Can't read the leading block from disk!\n");
+			goto out;
+		}
+		/*
+		 * Search the MBR partion table to find the linux partion
+		 */
+		for(i = 446; i < 512; i += 0x10) {
+			if(leadbuf[i + 4] == LINUX_PARTATION_ID) {
+				start_sec = *(unsigned short *)(leadbuf + i + 8 + 2);
+				start_sec <<= 16;
+				start_sec += *(unsigned short *)(leadbuf + i + 8);
+
+				devio_lseek(fd, start_sec * SECTOR_SIZE, 0);
+				if(devio_read(fd, diskbuf, 16 * SECTOR_SIZE) !=
+						16 * SECTOR_SIZE) {
+					printf("Ext2FS: Unable to seek Super Block sector\n");
+					goto out;
+				}
+
+				ext2_sb = (struct ext2_super_block *)(diskbuf + 1024);
+				if(ext2_sb->s_magic == EXT2_SUPER_MAGIC || ext2_sb->s_magic == EXT2_OLD_SUPER_MAGIC)
+					find_linux_partion++;
+				if(index == find_linux_partion) {
+					err = 0;
+					goto out;
+				}
 			}
 		}
 	}
+
+
+	devio_lseek(fd, start_sec * SECTOR_SIZE, 0);
+	if(devio_read(fd, diskbuf, 16 * SECTOR_SIZE) != 16 * SECTOR_SIZE)
+		printf("Ext2FS: Read the super block error!\n");
+
+	ext2_sb = (struct ext2_super_block *)(diskbuf + 1024);
+
+	if(ext2_sb->s_magic == EXT2_SUPER_MAGIC) {
+		printf("Ext2FS: Detected a Ext2+ partation");
+		err = 0;
+	} else if (ext2_sb->s_magic == EXT2_OLD_SUPER_MAGIC) {
+		printf("Ext2FS: Detected a legacy Ext2 partation");
+		err = 0;
+	} else {
+		printf("Ext2FS: Not a Ext2+ partation");
 	}
-
-	{
-			devio_lseek(fd,0,0);
-			start_sec=0;
-			if((devio_read(fd,diskbuf,16*RAW_SECTOR_SIZE))!=16*RAW_SECTOR_SIZE)
-			{
-				printf("Read the super block error!\n");
-				goto out;
-			}
-#if 0
-			for (k=0; k<RAW_SECTOR_SIZE; k++)
-			{
-				printf ("%#x\t", diskbuf[k]);
-				if (k%16 == 0)
-					printf ("\n");
-			}
-			printf ("\n");
-#endif
-	
-			ext2_sb=(struct ext2_super_block *)(diskbuf+1024);
-
-			INODES_PER_GROUP = ext2_sb->s_inodes_per_group;
-			RAW_BLOCK_SIZE = BLOCK_1KB << ext2_sb->s_log_block_size;
-
-			SECTORS_PER_BLOCK = RAW_BLOCK_SIZE / RAW_SECTOR_SIZE;
-			GROUPDESCS_PER_BLOCK = RAW_BLOCK_SIZE / EXT2_GROUP_DESC_SIZE;
-			if(ext2_sb->s_magic==EXT3_SUPER_MAGIC)
-			{
-				err=0;
-				goto out;
-			}
-	}
-	printf("There is no %d linux partion\n",index);
 out:
-	if(leadbuf)free(leadbuf);
-	if(diskbuf)free(diskbuf);
+	if(!err) {
+
+#ifdef DEBUG_EXT2
+		dump_feature(ext2_sb);
+#endif
+
+		if(ext2_sb->s_feature_incompat & EXT2_FEAT_INCOMP_64BIT) {
+			sb_grpdesc_size = 64;
+			/* now we not support 64bit bit file system */
+			printf("not support on 64bit feauture");
+			err = -1;
+		}
+
+		sb_ext2_inode_size = ext2_sb->s_inode_size;
+		sb_inodes_per_grp = ext2_sb->s_inodes_per_group;
+		sb_block_size = BLOCK_1KB << ext2_sb->s_log_block_size;
+		sb_grpdecs_per_block = sb_block_size / sb_grpdesc_size;
+	}
+	if(leadbuf)
+		free(leadbuf);
+	if(diskbuf)
+		free(diskbuf);
 	return err;
 }
 
@@ -150,160 +159,193 @@ out:
  */
 static inline ext2_dirent *ext2_next_entry(ext2_dirent *p)
 {
-	return (ext2_dirent *)((char*)p + le16_to_cpu(p->rec_len));
+	return (ext2_dirent *)((char*)p + p->rec_len);
 }
 
-/* ext2 entry name is not null terminated,so we could not use strcmp 
+/* ext2 entry name is not null terminated,so we could not use strcmp
  * return 0 if the first 'len' characters of 'entry' match those of 's'
  */
 static int ext2_entrycmp(char * s,void * entry , int len)
 {
 	int i;
-	if (strlen(s)!=len) return -1;
-	for(i=0;i<len;i++)
-		if(*(char *)(s+i)!=*(char *)((char *)entry+i)) return -1;
+	if (strlen(s) != len)
+		return -1;
+	for(i = 0; i < len; i++)
+		if(*(char *)(s + i) != *(char *)((char *)entry + i))
+			return -1;
 	return 0;
 }
 
-/* read inode 'ino' */
-static int ext2_get_inode(int fd,unsigned long ino,struct ext2_inode ** ext2_raw_inode_ptr)
+/*
+ * allocated a ext2_inode, and filled with inode info pointed by ino
+ * out: ext2_raw_inode_ptr
+ * return 0 for success
+ * -1 for error */
+static int ext2_get_inode(int fd, unsigned long ino, struct ext2_inode **ext2_raw_inode_ptr)
 {
-	unsigned long offset,block,block_group,group_desc,desc;
-	
+	unsigned long offset, block, block_group, group_desc, desc;
+
 	struct ext2_group_desc * ext2_gd;
 	unsigned char * bh;
-	off_t temp;	
+	off_t temp;
+	int err = -1;
 	/* in which block group*/
-	block_group = (ino-1) / INODES_PER_GROUP;
+	block_group = (ino - 1) / sb_inodes_per_grp;
 	/* in which block */
-	group_desc = block_group / GROUPDESCS_PER_BLOCK ;
-	/* introduction block(?), super block , then group descriptors 
-	 * introduction block maybe the same as super block 
+	group_desc = block_group / sb_grpdecs_per_block ;
+	/*
+	 * introduction block maybe the same as super block
 	 */
-	block = 1024/RAW_BLOCK_SIZE + 1 + group_desc;
+	block = 1024 / sb_block_size + 1 + group_desc;
 	/* which descriptor,inside the block */
-	desc = block_group % GROUPDESCS_PER_BLOCK;
-#ifdef DEBUG_IDE
-	printf("ext2_get_inode:ino=%d,block group=%d,block=%d,desc=%d\n",ino,block_group,block,desc);
+	desc = block_group % sb_grpdecs_per_block;
+	bh = (unsigned char *)malloc(sb_block_size);
+#ifdef DEBUG_EXT2
+	printf("ext2_get_inode:ino=%d,block group=%d,block=%d,desc=%d\n", ino, block_group, block, desc);
+	printf("1 bh:%lx\n", bh);
 #endif
-	bh = (unsigned char *)malloc(RAW_BLOCK_SIZE);
-	temp=(off_t)block*RAW_BLOCK_SIZE+start_sec*512;
-	devio_lseek(fd,temp,0);
-	if(	RAW_BLOCK_SIZE!=devio_read(fd,bh,RAW_BLOCK_SIZE)){ free(bh);return -1;}
-	ext2_gd = (struct ext2_group_desc *) (bh+desc*EXT2_GROUP_DESC_SIZE);
-#ifdef DEBUG_IDE
-	printf("ext2_group_desc -> bg_free_blocks_count=%d\n",ext2_gd->bg_free_blocks_count);
-	printf("ext2_group_desc -> bg_free_inodes_count=%d\n",ext2_gd->bg_free_inodes_count);
-	printf("ext2_group_desc -> bg_inode_table=%d\n",ext2_gd->bg_inode_table);
-	printf("ext2_group_desc -> bg_block_bitmap=%d\n",ext2_gd->bg_block_bitmap);
-	printf("ext2_group_desc -> bg_inode_bitmap=%d\n",ext2_gd->bg_inode_bitmap);
-#endif
-	offset = ((ino-1)%INODES_PER_GROUP) * EXT2_INODE_SIZE;
-	block  = ext2_gd->bg_inode_table + (offset/RAW_BLOCK_SIZE);
-	offset = offset % RAW_BLOCK_SIZE;
-#ifdef DEBUG_IDE
-	printf("ext2_get_inode: offset is %d,block is %d\n",offset,block);
-#endif
-	bh = (unsigned char * )malloc(RAW_BLOCK_SIZE);
-	temp=(off_t)block*RAW_BLOCK_SIZE+start_sec*512;
 
-#ifdef DEBUG_IDE
-	printf("the RAW_BLOCK_SIZE is %x\n",RAW_BLOCK_SIZE);
-	printf("In ext2fs.c    The seek offset is %llx\n",temp);
-	
-#endif	
-	devio_lseek(fd,temp,0);
-	if (RAW_BLOCK_SIZE!=devio_read(fd,bh,RAW_BLOCK_SIZE)) {free(bh);return -1;}
-	*ext2_raw_inode_ptr = (struct ext2_inode *) (bh + offset);
-#ifdef DEBUG_IDE
-	printf("inode->i_block[0]=%d,the inode->i_size=%d \n",(*ext2_raw_inode_ptr)->i_block[0],(*ext2_raw_inode_ptr)->i_size);
+	temp = (off_t)block * sb_block_size + start_sec * 512;
+	devio_lseek(fd, temp, 0);
+	if(sb_block_size != devio_read(fd, bh, sb_block_size)) {
+		printf("io read error\n");
+		goto out;
+	}
+	ext2_gd = (struct ext2_group_desc *)(bh + desc * sb_grpdesc_size);
+#ifdef DEBUG_EXT2
+	printf("ext2_group_desc -> bg_free_blocks_count=%d\n", ext2_gd->bg_free_blocks_count);
+	printf("ext2_group_desc -> bg_free_inodes_count=%d\n", ext2_gd->bg_free_inodes_count);
+	printf("ext2_group_desc -> bg_inode_table=%d\n", ext2_gd->bg_inode_table);
+	printf("ext2_group_desc -> bg_block_bitmap=%d\n", ext2_gd->bg_block_bitmap);
+	printf("ext2_group_desc -> bg_inode_bitmap=%d\n", ext2_gd->bg_inode_bitmap);
 #endif
-	return 0;
+	offset = ((ino - 1) % sb_inodes_per_grp) * sb_ext2_inode_size;
+	block  = ext2_gd->bg_inode_table + (offset / sb_block_size);
+	offset = offset % sb_block_size;
+#ifdef DEBUG_EXT2
+	printf("ext2_get_inode: offset is %d,block is %d\n", offset, block);
+	printf("2 bh:%lx\n", bh);
+#endif
+	memset(bh, 0, sb_block_size);
+	/*bzero(bh, sb_block_size);*/
+	temp = (off_t)block * sb_block_size + start_sec * 512;
+
+#ifdef DEBUG_EXT2
+	printf("the sb_block_size is 0x%x\n", sb_block_size);
+	printf("In ext2fs.c    The seek offset is %llx\n", temp);
+
+#endif
+	devio_lseek(fd, temp, 0);
+	if(sb_block_size != devio_read(fd, bh, sb_block_size)) {
+		printf("io read error\n");
+		goto out;
+	}
+
+	*ext2_raw_inode_ptr = (struct ext2_inode *)malloc(sb_ext2_inode_size);
+	if(!*ext2_raw_inode_ptr) {
+		printf("no mem\n");
+		goto out;
+	}
+	memcpy(*ext2_raw_inode_ptr, bh + offset, sb_ext2_inode_size);
+	err = 0;
+
+#ifdef DEBUG_EXT2
+	printf("inode->i_block[0]=%d,the inode->i_size=%d \n",
+			(*ext2_raw_inode_ptr)->i_block[0], (*ext2_raw_inode_ptr)->i_size);
+#endif
+out:
+	free(bh);
+	return err;
 }
 
-static int ext2_load_file_content(int fd,struct ext2_inode * inode,unsigned char * bh)  
-{
-	return ext2_read_file(fd,bh,inode->i_size,0,inode);
-}
-/* load linux kernel from ext2 partition
+/*
+ * load linux kernel from ext2 partition
  * return 0 if success,else -1
  */
+
 static int ext2_load_linux(int fd,int index, const unsigned char *path)
 {
-	struct ext2_inode * ext2_raw_inode;
-	ext2_dirent * de;
-	unsigned char * bh;
+	struct ext2_inode *ext2_raw_inode;
+	ext2_dirent *de;
+	unsigned char *bh;
 	int i;
 	unsigned int inode;
-	int find=1;
+	int find = 1;
 	unsigned char s[EXT2_NAME_LEN];
-	unsigned char pathname[EXT2_NAME_LEN],*pathnameptr;
+	unsigned char pathname[EXT2_NAME_LEN], *pathnameptr;
 	unsigned char *directoryname;
-	int showdir,lookupdir;
-	showdir=0;
-	lookupdir=0;
-	bh=0;
+	int showdir, lookupdir;
+
+	showdir = 0;
+	lookupdir = 0;
+	bh = 0;
+
 	if(read_super_block(fd,index))
 		return -1;
-	
-	if((path[0]==0)||(path[strlen(path)-1]=='/'))lookupdir=1;
-	
+
+	if((path[0]==0) || (path[strlen(path)-1] == '/'))
+		lookupdir = 1;
+
 	strncpy(pathname,path,sizeof(pathname));
-	pathnameptr=pathname;
-	for(inode=EXT2_ROOT_INO;find;)
-	{
-		for(i=0;pathnameptr[i]&&(pathnameptr[i]!='/');i++);
-		pathnameptr[i]=0;
-		directoryname=(unsigned char *)pathnameptr;
-		pathnameptr=(unsigned char *)(pathnameptr+i+1);
-		if(!strlen(directoryname)&&lookupdir)showdir=1;
-		if (ext2_get_inode(fd,inode,&ext2_raw_inode)) {
-			printf("load EXT2_ROOT_INO error");
+	pathnameptr = pathname;
+	for(inode = EXT2_ROOT_INO; find; ) {
+		for(i = 0; pathnameptr[i] && pathnameptr[i] != '/'; i++);
+
+		pathnameptr[i] = 0;
+
+		directoryname = (unsigned char *)pathnameptr;
+		pathnameptr = (unsigned char *)(pathnameptr + i + 1);
+
+		if(!strlen(directoryname) && lookupdir)
+			showdir = 1;
+		if(ext2_get_inode(fd, inode, &ext2_raw_inode)) {
+			printf("Ext2FS: Unable to get root inode \n");
 			return -1;
 		}
-		if(!bh)bh=(unsigned char *)malloc(RAW_BLOCK_SIZE+ext2_raw_inode->i_size);
-		if(bh==NULL){
+		if(!bh)
+			bh = (unsigned char *)malloc(sb_block_size + ext2_raw_inode->i_size);
+
+		if(!bh) {
 			printf("Error in allocting memory for file content!\n");
 			return -1;
 		}
-		ext2_load_file_content(fd,ext2_raw_inode,bh);
-		de = (ext2_dirent *) bh;
-		find=0;
-		
-		for ( ; ((unsigned char *) de < bh+ext2_raw_inode->i_size)&&(de->rec_len>0)&&(de->name_len>0) ; de = ext2_next_entry(de)){
+		if(ext2_read_file(fd, bh, ext2_raw_inode->i_size, 0,
+					ext2_raw_inode) != ext2_raw_inode->i_size)
+			return -1;
+		de = (ext2_dirent *)bh;
+		find = 0;
+
+		for ( ; ((unsigned char *) de < bh + ext2_raw_inode->i_size) &&
+				(de->rec_len > 0) && (de->name_len > 0); de = ext2_next_entry(de)) {
 			strncpy(s,de->name,de->name_len);
 			s[de->name_len]='\0';//*(de->name+de->name_len)='\0';
-#ifdef DEBUG_IDE			
+#ifdef DEBUG_EXT2
 			printf("entry:name=%s,inode=%d,rec_len=%d,name_len=%d,file_type=%d\n",s,de->inode,de->rec_len,de->name_len,de->file_type);
 #endif
-		    if(showdir){
+			if(showdir)
 				printf("%s%s",s,((de->file_type)&2)?"/ ":" ");
-			}
-			if (!ext2_entrycmp(directoryname, de->name, de->name_len)){ 
-				if(de->file_type==EXT2_FT_REG_FILE||de->file_type==EXT2_FT_UNKNOWN)
-				{
-					if (ext2_get_inode(fd,de->inode,&File_inode)) {
-						printf("load EXT2_ROOT_INO error");
+
+			if (!ext2_entrycmp(directoryname, de->name, de->name_len)) {
+				if(de->file_type == EXT2_FT_REG_FILE) {
+					if (ext2_get_inode(fd, de->inode, &the_inode)) {
+						printf("Ext2FS: Can not load EXT2 root inode \n");
 						free(bh);
 						return -1;
 					}
-					#define S_IFREG  0100000
-					if(File_inode->i_mode&S_IFREG)
-					{
 					free(bh);
 					return 0;
-					}
 				}
-				find=1;
-				inode=de->inode;
+				find = 1;
+				inode = de->inode;
 				break;
 			}
 		}
-		if(!find)
-		{
+		if(!find) {
 			free(bh);
-		if(!lookupdir)printf("Not find the file or directory!\n");
-		else printf("\n");
+			if(!lookupdir)
+				printf("Ext2FS: Can not find the file or directory!\n");
+			else
+				printf("\n");
 			return -1;
 		}
 	}
@@ -312,293 +354,499 @@ static int ext2_load_linux(int fd,int index, const unsigned char *path)
 
 
 
-//load /dev/fs/ext2@wd0/boot/vmlinux
-//path here is wd0/boot/vmlinux
+/*
+ * for cmd: load /dev/fs/ext2@wd0/boot/vmlinux
+ * the path we got here is wd0/boot/vmlinux
+ * */
 int ext2_open(int fd,const char *path,int flags,int mode)
-{	
-	int i,index;
-	char strbuf[EXT2_NAME_LEN],*str;
-	strncpy(strbuf,path,sizeof(strbuf));
-	for(i=0;strbuf[i]&&(strbuf[i]!='/');i++);
-	if(!strbuf[i]){
-		printf("the DEV Name  is expected!\n");
-		return -1;		
-	}
-	strbuf[i]=0;
-	{char *p;
-	 p=&strbuf[strlen(strbuf)-1];
-	if((p[0]>='a') && (p[0]<='z'))
-	{index=p[0]-'a'+1; 
-	 p[0]=0;
-	}
-	else if(p[0]=='A'||!strcmp(strbuf,"fd0"))index=0;
-	else index=1;
-	}
+{
+	int i, index;
+	char strbuf[EXT2_NAME_LEN], *str;
+	char *p;
 
-	if(devio_open(fd,strbuf,flags,mode)<0)//extract the device name
-	return -1;
-#ifdef DEBUG_IDE
-	printf("Open the device %s ok\n",strbuf);
+	strncpy(strbuf,path,sizeof(strbuf));
+
+	for(i = 0; strbuf[i]&&(strbuf[i]!='/'); i++) ;
+
+	if(!strbuf[i]){
+		printf("Ext2FS: Unexpected dev name\n");
+		return -1;
+	}
+	strbuf[i] = 0;
+	p = &strbuf[strlen(strbuf)-1];
+	if((p[0]>='a') && (p[0]<='z')) {
+		index=p[0]-'a'+1;
+		p[0]=0;
+	}
+	else if(p[0]=='A'||!strcmp(strbuf,"fd0"))
+		index=0;
+	else
+		index=1;
+
+	/* extract the device name */
+	if(devio_open(fd,strbuf,flags,mode) < 0)
+		return -1;
+#ifdef DEBUG_EXT2
+	printf("Ext2FS: Sucessfully open the device: %s\n", strbuf);
 #endif
-	str=strbuf+i+1;
-//	for(i=1;i<5;i++){
-		if(!(ext2_load_linux(fd,index,str)))
-			return fd;	
-	if((str[0]!=0)&&(str[strlen(str)-1]!='/'))	printf("we can't locate root directory in super block!\n");
-//	}
+	str = strbuf + i + 1;
+	if(!(ext2_load_linux(fd, index, str)))
+		return fd;
+	if((str[0] != 0) && (str[strlen(str)-1] != '/'))
+		printf("Ext2FS: Broken SuperBlock, can not find root node\n");
 	return -1;
 }
+
 int ext2_close(int fd)
 {
 	_file[fd].posn = 0;
 	return devio_close(fd);
 }
-static int ReadFromIndexBlock(int fd,__u32 start_block,__u32 end_block,__u8 **ReadBuf,	size_t *size,size_t *position,__u32 *addr_start)
-//ReadBuf  :point to the file content
-//size:the real number still need to be read
-//position:the file point where the read start
-//return :0--successful
-//	  others--error
+
+/*
+ * ReadBuf: point to the file content
+ * size: the real number still need to be read
+ * position: the file point where the read start
+ * return:
+ * 0 -- successful
+ * others -- error
+ * */
+static int ReadFromIndexBlock(int fd, __u32 start_block, __u32 end_block, __u8 **ReadBuf, size_t *size, size_t *position, __u32 *addr_start)
 {
 	__u32 remain_count;
 	int re;
-	off_t remain_size,addr_abosolute_start;
-	if(start_block>end_block)
+	off_t remain_size, addr_abosolute_start;
+	if(start_block > end_block)
 		return 0;
-#ifdef DEBUG_IDE
-	printf("I want to read data size :%u, start_block is %d,end_block is %u\n",*size,start_block,end_block);
+#ifdef DEBUG_EXT2
+	printf("I want to read data size :%u, start_block is %d,end_block is %u\n",
+			*size , start_block, end_block);
 #endif
-//------------------------------------------------------------------------------------	
-	//Read the unaligned data within a block. 
-	remain_size=RAW_BLOCK_SIZE-*position%RAW_BLOCK_SIZE;
-	if(remain_size>*size)
-	{
-		remain_size=*size;
-		remain_count=0;
+	/*Read the unaligned data within a block. */
+	remain_size = sb_block_size - *position % sb_block_size;
+	if(remain_size > *size) {
+		remain_size = *size;
+		remain_count = 0;
+	}
+	else if(remain_size == sb_block_size) {
+		remain_size = 0;
+		remain_count = 0;
 	}
 	else
-	if(remain_size==RAW_BLOCK_SIZE)
-	{
-		remain_size=0;
-		remain_count=0;
-	}
-	else
-		remain_count=1;
-	addr_start+=start_block;
-	//start_block starts with 0. 0-11:direct others 0-1023.???????
-	addr_abosolute_start=(off_t)*addr_start*RAW_BLOCK_SIZE+*position%RAW_BLOCK_SIZE;
-	if(remain_count)
-	{
-		devio_lseek(fd,addr_abosolute_start+START_PARTION,0);
-		re=devio_read(fd,(__u8 *)*ReadBuf,remain_size);
-		if(re!=remain_size){
+		remain_count = 1;
+
+	addr_start += start_block;
+
+	/*  start_block starts with 0. 0-11:direct others 0-1023.*/
+	addr_abosolute_start =
+		(off_t)*addr_start * sb_block_size + *position % sb_block_size;
+	if(remain_count) {
+		devio_lseek(fd, addr_abosolute_start + START_PARTION, 0);
+		re = devio_read(fd, (__u8 *)*ReadBuf, remain_size);
+		if(re != remain_size) {
 			printf("Can't Read Data From the Disk \n");
-			return -1;}
-		start_block+=remain_count;
-		addr_start+=remain_count;
-		remain_count=0;	
-		*ReadBuf+=remain_size;
-		*position+=remain_size;
-		*size-=remain_size;
-		addr_abosolute_start=(off_t)*addr_start*RAW_BLOCK_SIZE+*position%RAW_BLOCK_SIZE;
-		remain_size=0;
-	}
-//------------------------------------------------------------------------------------
-//Read the BLOCK aligned data
-	while(*size&&(remain_size<*size)&&(remain_count+start_block<=end_block))
-	{
-		if(*(addr_start+remain_count+1)==*(addr_start+remain_count)+1)
-		//continuous block ,so we just remember the blocks number .
-		{
-			if(remain_size+RAW_BLOCK_SIZE>*size)
-				remain_size=*size;
-			else
-			{
-				remain_count++;
-				remain_size+=RAW_BLOCK_SIZE;
-			}
+			return -1;
 		}
-		else
-		{
-#ifdef DEBUG_IDE
-	printf("The remain size is %u ,size is%u\n",remain_size,*size);
-	printf("Block begin at %u,end at %u\n",*addr_start,*(addr_start+remain_count));
+		start_block += remain_count;
+		addr_start += remain_count;
+		remain_count = 0;
+		*ReadBuf += remain_size;
+		*position += remain_size;
+		*size -= remain_size;
+		addr_abosolute_start =
+			(off_t)*addr_start * sb_block_size + *position % sb_block_size;
+		remain_size = 0;
+	}
+	/*Read the BLOCK aligned data*/
+	while(*size && remain_size < *size &&
+			(remain_count+start_block <= end_block)) {
+		if( *(addr_start + remain_count + 1) ==
+				*(addr_start + remain_count) + 1) {
+			if(remain_size + sb_block_size > *size)
+				remain_size = *size;
+			else {
+				remain_count++;
+				remain_size += sb_block_size;
+			}
+		} else {
+#ifdef DEBUG_EXT2
+			printf("The remain size is %u ,size is%u\n", remain_size, *size);
+			printf("Block begin at %u, end at %u\n",
+					*addr_start, *(addr_start + remain_count));
 #endif
-			if(!remain_size)
-			//if not continuous,we just read one block
-			{
-			
-				if(*size<RAW_BLOCK_SIZE)
-					remain_size=*size;
-				else
-				{
-					remain_size=RAW_BLOCK_SIZE;
-					remain_count=1;
+			if(!remain_size) {
+				/*if not continuous,we just read one block*/
+
+				if(*size < sb_block_size)
+					remain_size =* size;
+				else {
+					remain_size = sb_block_size;
+					remain_count = 1;
 				}
 			}
-			if(*addr_start==0 && remain_count == 1)
-			{
-			memset((__u8 *)*ReadBuf,0,remain_size);
-			re=remain_size;
+			if(*addr_start == 0 && remain_count == 1) {
+				memset((__u8 *)*ReadBuf,0,remain_size);
+				re=remain_size;
+			} else {
+				devio_lseek(fd, addr_abosolute_start + START_PARTION, 0);
+				re = devio_read(fd, (__u8 *)*ReadBuf, remain_size);
 			}
-			else
-			{
-			devio_lseek(fd,addr_abosolute_start+START_PARTION,0);
-			re=devio_read(fd,(__u8 *)*ReadBuf,remain_size);
-			}
-			if(re!=remain_size)
-			{
+			if(re!=remain_size) {
 				printf("We can't read data from disk!\n");
 				return -1;
 			}
-			start_block+=remain_count;
-			addr_start+=remain_count;
-			remain_count=0;
-			*ReadBuf+=remain_size;
-			*position+=remain_size;
-			*size-=remain_size;
-			if((*position%RAW_BLOCK_SIZE)&&*size)
-			{
+			start_block += remain_count;
+			addr_start += remain_count;
+			remain_count = 0;
+			*ReadBuf += remain_size;
+			*position += remain_size;
+			*size -= remain_size;
+			if((*position % sb_block_size) && *size) {
 				printf("Oh,My God!When I read in the aligned data,I met one unaligned position\n");
 				return -1;
-				}
-			addr_abosolute_start=(off_t)*addr_start*RAW_BLOCK_SIZE;
-			remain_size=0;
+			}
+			addr_abosolute_start = ((off_t)*addr_start) * sb_block_size;
+			remain_size = 0;
 		}
 	}
-	if(!*size) return 0;//No data need to read.Wonderful!
-	if(remain_size)
-	{
-		if(remain_size>*size)
-			remain_size=*size;
-		devio_lseek(fd,addr_abosolute_start+START_PARTION,0);
-#ifdef DEBUG_IDE
-	printf("The remain size is %u,size is %u\n",remain_size,*size);
-	printf("Additional Block begin at %d,end at %d\n",*addr_start,*(addr_start+remain_count));
+
+	/*No data need to read.Wonderful!*/
+	if(!*size)
+		return 0;
+	if(remain_size) {
+		if(remain_size > *size)
+			remain_size = *size;
+		devio_lseek(fd, addr_abosolute_start + START_PARTION, 0);
+#ifdef DEBUG_EXT2
+		printf("The remain size is %u,size is %u\n", remain_size, *size);
+		printf("Additional Block begin at %d,end at %d\n", *addr_start, *(addr_start + remain_count));
 #endif
-		re=devio_read(fd,(__u8 *)*ReadBuf,remain_size);
-		*ReadBuf+=remain_size;
-		if(re!=remain_size)
-		{
+		re = devio_read(fd, (__u8 *)*ReadBuf, remain_size);
+		*ReadBuf += remain_size;
+		if(re != remain_size) {
 			printf("We can't read data from disk!\n");
 			return -1;
 		}
-		*position+=remain_size;
-		*size-=remain_size;
+		*position += remain_size;
+		*size -= remain_size;
 	}
 	return 0;
 }
-	
-int ext2_read(int fd,void *read_start,size_t size)
+
+int ext2_read(int fd, void *read_start,size_t size)
 {
 	int real_size;
-	
+
 	memset(read_start, 0, size);
-	if ((_file[fd].posn + size) > File_inode->i_size) {
-		size = File_inode->i_size - _file[fd].posn;
+	if((_file[fd].posn + size) > the_inode->i_size) {
+		size = the_inode->i_size - _file[fd].posn;
 	}
-	real_size=ext2_read_file(fd,read_start,size,_file[fd].posn,File_inode);
-	if ((_file[fd].posn + real_size) > File_inode->i_size) {
-		real_size = File_inode->i_size - _file[fd].posn; 
-		_file[fd].posn = File_inode->i_size;
-	} else {
-		_file[fd].posn+=real_size;	
-	}
+
+	real_size = ext2_read_file(fd, read_start, size, _file[fd].posn, the_inode);
+	if((_file[fd].posn + real_size) > the_inode->i_size) {
+		real_size = the_inode->i_size - _file[fd].posn;
+		_file[fd].posn = the_inode->i_size;
+	} else
+		_file[fd].posn += real_size;
+
 	return real_size;
 }
-static int ext2_read_file(int fd,void *read_start,size_t size,size_t pos,struct ext2_inode * inode)
-{	
-	__u8 *buff,*index_buff,*start=(__u8 *)read_start;
-	size_t read_size=size,position=pos;
-	__u32 *addr_start,*d_addr_start,start_block;
-	int re,i;
-	start_block=position/RAW_BLOCK_SIZE;
-	addr_start=inode->i_block;	
-#ifdef DEBUG_IDE
-	printf("the pos is %llx,the size is %llx\n",position,read_size);
+
+/*
+ * return the extent node for file_block of file pointed
+ * by extent_hdr
+ * fd : file desc to block device
+ * buff: the buffer provided by caller with 1 block size
+ * extent_hdr: the root node of the extent tree of the file
+ * file_block: the file block number of the file
+ */
+static struct ext4_extent_hdr * get_extent_node(int fd, __u8 buff,
+		struct ext4_extent_hdr *extent_hdr, __u32 file_block)
+{
+	struct ext4_extent_idx *idx;
+	unsigned long long block;
+	int i;
+
+	while(1) {
+		idx = (struct ext4_extent_idx *)(extent_hdr + 1);
+#ifdef	DEBUG_EXT2
+		printf("eh_depth:%d, eh_entries:%d, eh_max:%d, block:%d\n",
+				extent_hdr->eh_depth, extent_hdr->eh_entries,
+				extent_hdr->eh_max, file_block);
 #endif
-	re=ReadFromIndexBlock(fd,start_block,11,&start,&read_size,&position,addr_start);
-#ifdef DEBUG_IDE
-	printf("The addr_start is %x,RAW_BLOCK_SIZE is %x,start_sec is %x\n",*addr_start,RAW_BLOCK_SIZE,start_sec);
+		if(extent_hdr->eh_magic != EXT4_EXT_MAGIC)
+			printf("Ext2FS: Not a Ext4 partation with extend feature\n");
+			return 0;
+
+		if(!extent_hdr->eh_depth)
+			return extent_hdr;
+		i = -1;
+		do {
+			i++;
+			if(i >= extent_hdr->eh_entries)
+				break;
+#ifdef	DEBUG_EXT2
+			printf("ei_hi:%d, ei_block:%d, ei_lo:%d\n",
+					idx[i].ei_leaf_hi, idx[i].ei_block,
+					idx[i].ei_leaf_lo);
 #endif
-	if(re)
-	{
-		printf("Error in Reading from direct block\n");
+
+		} while(file_block > idx[i].ei_block);
+
+		if(--i < 0)
+			return 0;
+
+		block = idx[i].ei_leaf_hi;
+		block = (block << 32) | idx[i].ei_leaf_lo;
+
+		devio_lseek(fd, block * sb_block_size + START_PARTION, 0);
+		if(devio_read(fd, buff, sb_block_size) != sb_block_size)
+			return 0;
+		else
+			extent_hdr = (struct ext4_extent_hdr *)buff;
+
+	}
+
+
+}
+
+/*
+ * return the block nr for file logical number file_block
+ * fd: the device holding the filesystem
+ * idx: the root extent header for the filesystem
+ * file_block: the logical file logical number
+ */
+static long long read_extent_block(int fd, struct ext4_extent_hdr *idx,
+		__u32 file_block)
+{
+	unsigned long long blk;
+	struct ext4_extent_hdr *leaf_node;
+	struct ext4_extent *extent;
+	__u8  *ext_buff = (unsigned char *)malloc(sb_block_size);
+	int i = -1;
+
+	if(!ext_buff) {
+		printf("Ext2FS: Unable to allocte memory for Extend Buffer \n");
+		return -1;
+	}
+
+	leaf_node = get_extent_node(fd, ext_buff, idx, file_block);
+	if(!leaf_node) {
+		printf("Ext2FS: Unable to get extend node\n");
+		return -1;
+	}
+#ifdef DEBUG_EXT2
+	printf("depth:%d, entry:%d, max%d, block:%d\n", leaf_node->eh_depth,
+			leaf_node->eh_entries, leaf_node->eh_max,
+			file_block);
+#endif
+
+
+	extent = (struct ext4_extent *)(leaf_node + 1);
+	do {
+		++i;
+		if(i >= leaf_node->eh_entries)
+			break;
+#ifdef DEBUG_EXT2
+		printf("ent:%d, ee_block:%d, ee_len:%d, ee_start_lo %d\n",
+				i, extent[i].ee_block, extent[i].ee_len,
+				extent[i].ee_start_lo);
+#endif
+	} while(file_block >= extent[i].ee_block);
+
+
+	if(--i >= 0) {
+		file_block -= extent[i].ee_block;
+#ifdef DEBUG_EXT2
+		printf("block:%d, ee_block:%d, ee_len:%d, ee_start_lo %d\n",
+				file_block, extent[i].ee_block, extent[i].ee_len,
+				extent[i].ee_start_lo);
+#endif
+		if(file_block >= extent[i].ee_len) {
+			free(ext_buff);
+			return 0;
+		}
+
+		blk = extent[i].ee_start_hi;
+		blk = blk << 32 | extent[i].ee_start_lo;
+		free(ext_buff);
+#ifdef DEBUG_EXT2
+		printf("blk:%ld, ret %ld\n", blk, file_block + blk);
+#endif
+		return file_block + blk;
+	}
+
+	printf("Ext2FS: Unable to read extend block\n");
+	free(ext_buff);
+	return -1;
+}
+
+
+/*
+ * read file with Ext4 extent feature
+ */
+
+static int ext2_read_file_extend(int fd, void *read_start,
+		size_t size, size_t pos, struct ext2_inode *inode)
+{
+	struct ext4_extent_hdr *extent_hdr;
+
+	long long blk;
+	size_t off;
+	int i;
+	__u32 blk_start = pos / sb_block_size;
+	__u32 blk_end = (pos + size + sb_block_size - 1) / sb_block_size;
+	off = 0;
+#ifdef DEBUG_EXT2
+	printf("size:%d, pos:%d flags:0x%x\n", size, pos, inode->i_flags);
+#endif
+
+	extent_hdr = (struct ext4_extent_hdr *)(inode->i_block);
+
+	for(i = blk_start; i < blk_end; i++) {
+		int skip;
+		int len;
+		int ret;
+
+		blk = read_extent_block(fd, extent_hdr, i);
+#ifdef DEBUG_EXT2
+		printf("blk:%d, file_block:%d\n", blk, i);
+#endif
+		if(blk < 0)
+			return -1;
+
+		if(i == pos / sb_block_size) {
+			skip = pos % sb_block_size;
+			len = (size <= (sb_block_size - skip) ?
+					size : sb_block_size - skip);
+		} else {
+			skip = 0;
+			len = (size <= sb_block_size ?
+					size : sb_block_size);
+
+		}
+
+		if(!len)
+			break;
+
+		if(size / sb_block_size)
+			len = sb_block_size - skip;
+		else
+			len = size % sb_block_size;
+		if(!len)
+			len = sb_block_size;
+
+		/*blk = blk * sb_block_size + START_PARTION + skip * sb_block_size;*/
+		blk = blk * sb_block_size + START_PARTION + skip;
+		devio_lseek(fd, blk, 0);
+		ret = devio_read(fd, read_start + off, len);
+#ifdef DEBUG_EXT2
+		printf("ret:%d, size:%d, off:%d, skip:%d, len:%d \n",
+				ret, size, off, skip, len);
+#endif
+		if(ret < 0)
+			return -1;
+		if(ret != len)
+			return ret + off;
+
+		size -= len;
+		off += len;
+	}
+
+#ifdef DEBUG_EXT2
+	printf("size:%d, off:%d\n", size, off);
+#endif
+	return off;
+}
+static int ext2_read_file_simple(int fd, void *read_start, size_t size, size_t pos,
+		struct ext2_inode *inode)
+{
+	__u32 *addr_start, *d_addr_start, start_block;
+	int re, i;
+	__u8 *buff, *index_buff, *start = (__u8 *)read_start;
+	size_t read_size = size, position = pos;
+
+	start_block = position / sb_block_size;
+	addr_start = inode->i_block;
+#ifdef DEBUG_EXT2
+	printf("the pos is %llx,the size is %llx\n", position, read_size);
+#endif
+	re = ReadFromIndexBlock(fd, start_block, 11, &start, &read_size,
+			&position, addr_start);
+#ifdef DEBUG_EXT2
+	printf("The addr_start is 0x%x, sb_block_size is 0x%x, start_sec is 0x%x\n",
+			*addr_start, sb_block_size, start_sec);
+#endif
+	if(re) {
+		printf("Ext2FS: Error in Reading from direct block\n");
 		return 0;
 	}
-	if(!read_size)
-	{
-#ifdef DEBUG_IDE
-		for(i=0;i<size;i+=RAW_BLOCK_SIZE/4)
-			printf("%4x",(__u8)*((__u8 *)read_start+i));
+	if(!read_size) {
+#ifdef DEBUG_EXT2
+		for(i = 0; i < size; i += sb_block_size/4)
+			printf("%4x",(__u8)*((__u8 *)read_start + i));
 		printf("\n");
 #endif
 		return (int)size;
 	}
-//////////////////////Read Index block///////////////////////////////////
-	start_block=position/RAW_BLOCK_SIZE-12;
-	buff=(__u8 *)malloc(RAW_BLOCK_SIZE);
-	if(!buff)
-	{
-		printf("Can't alloc memory!\n");
+	start_block = position / sb_block_size - 12;
+	buff = (__u8 *)malloc(sb_block_size);
+	if(!buff) {
+		printf("Ext2FS: Can't alloc memory for start block buffer\n");
 		return 0;
 	}
-	addr_start=&(inode->i_block[12]);
-	devio_lseek(fd,(off_t)*addr_start*RAW_BLOCK_SIZE+START_PARTION, 0);
-	re=devio_read(fd,buff,RAW_BLOCK_SIZE);
-	if(re!=RAW_BLOCK_SIZE)
-	{
-		printf("Read the iblock[12] error!\n");
+	addr_start = &(inode->i_block[12]);
+	devio_lseek(fd, (off_t)*addr_start * sb_block_size + START_PARTION, 0);
+	re = devio_read(fd, buff, sb_block_size);
+	if(re != sb_block_size) {
+		printf("Ext2FS: Unable to read the single index block\n");
 		return 0;
 	}
-	addr_start=(__u32 *)buff;
-	re=ReadFromIndexBlock(fd,start_block,RAW_BLOCK_SIZE/4-1,&start,&read_size,&position,addr_start);
+	addr_start = (__u32 *)buff;
+	re = ReadFromIndexBlock(fd, start_block, sb_block_size/4-1, &start,
+			&read_size, &position, addr_start);
 	if(re) {
 		free((char*)buff);	/*spark add*/
 		return 0;
 	}
-	if(!read_size)
-	{
-#ifdef DEBUG_IDE
-		for(i=0;i<size;i+=RAW_BLOCK_SIZE/4)
-			printf("%4x",(__u8)*((__u8 *)read_start+i));
+	if(!read_size) {
+#ifdef DEBUG_EXT2
+		for(i = 0; i < size; i += sb_block_size/4)
+			printf("%4x",(__u8)*((__u8 *)read_start + i));
 		printf("\n");
 #endif
 		free((char*)buff);              /* spark add */
 		return (int)size;
 	}
-/////////////////////////////////////////Read Double index block////////////////
-	addr_start=&(inode->i_block[13]);
-	devio_lseek(fd,(off_t)*addr_start*RAW_BLOCK_SIZE+START_PARTION,0);
-	re=devio_read(fd,buff,RAW_BLOCK_SIZE);
-	if(re!=RAW_BLOCK_SIZE)
-	{
-		printf("Read the iblock[13] error!\n");
+
+	/* Read Double index block */
+	addr_start = &(inode->i_block[13]);
+	devio_lseek(fd,(off_t)*addr_start * sb_block_size + START_PARTION, 0);
+	re = devio_read(fd, buff, sb_block_size);
+	if(re != sb_block_size) {
+		printf("Ext2FS: Unable to read the double index block\n");
 		free((char*)buff);	/* spark add */
 		return 0;
 	}
-	d_addr_start=(__u32 *)buff;
-	index_buff=(__u8 *)malloc(RAW_BLOCK_SIZE);
-	if(!index_buff)
-	{
-		printf("Can't alloc memory!\n");
+	d_addr_start = (__u32 *)buff;
+	index_buff = (__u8 *)malloc(sb_block_size);
+	if(!index_buff) {
+		printf("Ext2FS: Can't allocate memory for index block buffer \n");
 		return 0;
 	}
-	for(i=0;i<RAW_BLOCK_SIZE/4;i++)
-	{	
-		devio_lseek(fd,(off_t)*(d_addr_start+i)*RAW_BLOCK_SIZE+START_PARTION,0);
-		re=devio_read(fd,index_buff,RAW_BLOCK_SIZE);
-		if(re!=RAW_BLOCK_SIZE)
-		{
-			printf("Can't read index block!\n");
+	for(i = 0;i < sb_block_size/4; i++) {
+		devio_lseek(fd, (off_t)*(d_addr_start+i) * sb_block_size + START_PARTION, 0);
+		re = devio_read(fd, index_buff, sb_block_size);
+		if(re != sb_block_size) {
+			printf("Ext2FS: Can't read index block\n");
 			return 0;
 		}
-		addr_start=(__u32 *)index_buff;
-		start_block=position/RAW_BLOCK_SIZE-12-RAW_BLOCK_SIZE/4*(i+1);
-		re=ReadFromIndexBlock(fd,start_block,RAW_BLOCK_SIZE/4-1,&start,&read_size,&position,addr_start);
-		if(re)
-		{
-			printf("Can't read the double index block!\n");
+		addr_start = (__u32 *)index_buff;
+		start_block = position/sb_block_size - 12 - sb_block_size/4 * (i + 1);
+		re = ReadFromIndexBlock(fd, start_block, sb_block_size/4 - 1, &start, &read_size,
+				&position, addr_start);
+		if(re) {
+			printf("Ext2FS: Unable to read the start block\n");
 			free((char*)buff);
 			free((char*)index_buff);	/* spark add */
 			return 0;
@@ -609,19 +857,31 @@ static int ext2_read_file(int fd,void *read_start,size_t size,size_t pos,struct 
 			return (int)size;
 		}
 	}
-	printf("I can't read so big files,give me a email!\n");
+	printf("Ext2FS: File too big \n");
 	return 0;
 }
+
+static int ext2_read_file(int fd, void *read_start, size_t size, size_t pos,
+		struct ext2_inode *inode)
+{
+	if(inode->i_flags & EXT4_EXTENTS_FL)
+		return ext2_read_file_extend(fd, read_start, size, pos, inode);
+	else
+		return ext2_read_file_simple(fd, read_start, size, pos, inode);
+
+}
+
 int ext2_write(int fd,const void *start,size_t size)
 {
+	printf("Ext2FS: Wirte feature is not supported \n");
 	return 0;
 }
 off_t ext2_lseek(int fd,off_t offset,int where)
 {
-		_file[fd].posn=offset;
+	_file[fd].posn = offset;
 	return offset;
 }
-static DiskFileSystem diskfile={
+static DiskFileSystem diskfile = {
 	"ext2",
 	ext2_open,
 	ext2_read,
